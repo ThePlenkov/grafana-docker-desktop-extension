@@ -1,0 +1,10 @@
+{
+  "icon": "grafana.svg",
+  "ui": {
+    "dashboard-tab": {
+      "title": "Grafana LGTM",
+      "root": "/ui",
+      "src": "index.html"
+    }
+  }
+}
