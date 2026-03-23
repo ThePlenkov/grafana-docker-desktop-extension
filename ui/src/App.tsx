@@ -11,12 +11,10 @@ import {
   CircularProgress,
   CssBaseline,
   Divider,
-  FormControlLabel,
   Grid,
   IconButton,
   Paper,
   Snackbar,
-  Switch,
   TextField,
   ThemeProvider,
   Tooltip,
@@ -48,18 +46,18 @@ const darkTheme = createTheme({
   typography: { fontFamily: '"Inter", "Roboto", sans-serif' },
 });
 
+const VOLUME_NAME = `${CONTAINER_NAME}-data`;
+
 interface Config {
   grafanaPort: number;
   otlpGrpcPort: number;
   otlpHttpPort: number;
-  enablePersistence: boolean;
 }
 
 const defaultConfig: Config = {
   grafanaPort: 3000,
   otlpGrpcPort: 4317,
   otlpHttpPort: 4318,
-  enablePersistence: false,
 };
 
 type ContainerStatus =
@@ -242,6 +240,10 @@ export function App() {
             CONTAINER_NAME,
             "--label",
             "com.docker.desktop.extension.managed-by=grafana-otel-lgtm-ext",
+            "--restart",
+            "unless-stopped",
+            "-v",
+            `${VOLUME_NAME}:/data`,
             "-p",
             `${config.grafanaPort}:3000`,
             "-p",
@@ -249,16 +251,6 @@ export function App() {
             "-p",
             `${config.otlpHttpPort}:4318`,
           ];
-          if (config.enablePersistence) {
-            runArgs.push(
-              "-v",
-              `${CONTAINER_NAME}-grafana:/var/lib/grafana`,
-              "-v",
-              `${CONTAINER_NAME}-loki:/data/loki`,
-              "-v",
-              `${CONTAINER_NAME}-tempo:/var/tempo`,
-            );
-          }
           runArgs.push("grafana/otel-lgtm");
           await ddClient.docker.cli.exec("run", runArgs);
         } else {
@@ -323,7 +315,10 @@ export function App() {
           await ddClient.docker.cli.exec("stop", [CONTAINER_NAME]);
         }
         await ddClient.docker.cli.exec("rm", [CONTAINER_NAME]);
-        setToast({ msg: "Container removed", severity: "info" });
+        setToast({
+          msg: "Container removed. Telemetry data is preserved in the volume and will be available on next start.",
+          severity: "info",
+        });
         await checkStatus();
       } catch (e) {
         setToast({
@@ -411,7 +406,7 @@ export function App() {
               Grafana OpenTelemetry LGTM
             </Typography>
             <Typography variant="body2" color="text.secondary">
-              Loki · Grafana · Tempo · Mimir — all-in-one observability stack
+              Loki · Grafana · Tempo · Prometheus — all-in-one observability stack
             </Typography>
           </Box>
           <Box sx={{ ml: "auto", display: "flex", alignItems: "center" }}>
@@ -633,22 +628,6 @@ export function App() {
                       ? "1\u201365535"
                       : "Default: 4318"
                   }
-                />
-              </Grid>
-              <Grid item xs={12}>
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={draftConfig.enablePersistence}
-                      onChange={(e) =>
-                        setDraftConfig((c) => ({
-                          ...c,
-                          enablePersistence: e.target.checked,
-                        }))
-                      }
-                    />
-                  }
-                  label="Enable data persistence (Grafana, Loki, Tempo volumes)"
                 />
               </Grid>
               <Grid item xs={12}>
