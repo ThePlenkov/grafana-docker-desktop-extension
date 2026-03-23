@@ -71,9 +71,9 @@ visualise your logs, traces, and metrics in Grafana.
 
 ```bash
 cd ui
-npm ci
-npm run build    # production build → ui/dist/
-npm run dev      # dev server at http://localhost:5173
+bun install
+bun run build    # production build → ui/dist/
+bun run dev      # dev server at http://localhost:5173
 ```
 
 Build the extension image:

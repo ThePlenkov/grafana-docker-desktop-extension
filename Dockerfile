@@ -14,4 +14,3 @@ LABEL org.opencontainers.image.title="Grafana OpenTelemetry LGTM" \
 COPY ui/dist /ui
 COPY metadata.json .
 COPY grafana.svg .
-COPY docker-compose.yaml .

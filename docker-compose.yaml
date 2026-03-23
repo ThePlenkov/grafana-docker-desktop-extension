@@ -1,3 +1,6 @@
+# For local development / standalone use only.
+# NOT included in the Docker Desktop extension image — the UI manages
+# the container lifecycle via ddClient.docker.cli.exec().
 services:
   otel-lgtm:
     image: grafana/otel-lgtm

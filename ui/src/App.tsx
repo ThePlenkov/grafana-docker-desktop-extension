@@ -67,6 +67,17 @@ type ContainerStatus =
   | "not_found"
   | "unknown";
 
+function extractError(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "object" && e !== null) {
+    const obj = e as Record<string, unknown>;
+    if (typeof obj.stderr === "string" && obj.stderr) return obj.stderr.trim();
+    if (typeof obj.message === "string" && obj.message) return obj.message;
+  }
+  const s = String(e);
+  return s === "[object Object]" ? "Unknown error" : s;
+}
+
 function isValidPort(port: number): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
@@ -175,14 +186,11 @@ export function App() {
   const checkStatus = useCallback(async () => {
     try {
       const result = await ddClient.docker.cli.exec("inspect", [
-        "--format",
-        "{{.State.Status}}||{{json .NetworkSettings.Ports}}",
         CONTAINER_NAME,
       ]);
-      const output = result.stdout.trim();
-      const sepIdx = output.indexOf("||");
-      const s = sepIdx >= 0 ? output.slice(0, sepIdx) : output;
-      const portsJson = sepIdx >= 0 ? output.slice(sepIdx + 2) : "";
+      const data = JSON.parse(result.stdout);
+      const container = Array.isArray(data) ? data[0] : data;
+      const s: string = container?.State?.Status ?? "";
 
       if (s === "running") setStatus("running");
       else if (s === "paused") setStatus("paused");
@@ -191,8 +199,8 @@ export function App() {
 
       // Parse actual port bindings
       try {
-        if (portsJson) {
-          const ports = JSON.parse(portsJson);
+        const ports = container?.NetworkSettings?.Ports;
+        if (ports) {
           const getHostPort = (containerPort: string): number => {
             const bindings = ports[containerPort];
             if (Array.isArray(bindings) && bindings.length > 0) {
@@ -260,7 +268,7 @@ export function App() {
         await checkStatus();
       } catch (e) {
         setToast({
-          msg: `Failed to start: ${e instanceof Error ? e.message : String(e)}`,
+          msg: `Failed to start: ${extractError(e)}`,
           severity: "error",
         });
       }
@@ -274,7 +282,7 @@ export function App() {
         await checkStatus();
       } catch (e) {
         setToast({
-          msg: `Failed to stop: ${e instanceof Error ? e.message : String(e)}`,
+          msg: `Failed to stop: ${extractError(e)}`,
           severity: "error",
         });
       }
@@ -288,7 +296,7 @@ export function App() {
         await checkStatus();
       } catch (e) {
         setToast({
-          msg: `Failed to unpause: ${e instanceof Error ? e.message : String(e)}`,
+          msg: `Failed to unpause: ${extractError(e)}`,
           severity: "error",
         });
       }
@@ -302,7 +310,7 @@ export function App() {
         await checkStatus();
       } catch (e) {
         setToast({
-          msg: `Failed to restart: ${e instanceof Error ? e.message : String(e)}`,
+          msg: `Failed to restart: ${extractError(e)}`,
           severity: "error",
         });
       }
@@ -322,7 +330,7 @@ export function App() {
         await checkStatus();
       } catch (e) {
         setToast({
-          msg: `Failed to remove: ${e instanceof Error ? e.message : String(e)}`,
+          msg: `Failed to remove: ${extractError(e)}`,
           severity: "error",
         });
       }
