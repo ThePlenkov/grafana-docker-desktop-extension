@@ -1,11 +1,3 @@
-# Build UI
-FROM node:18-alpine AS ui-builder
-WORKDIR /app/ui
-COPY ui/package*.json ./
-RUN npm ci
-COPY ui/ .
-RUN npm run build
-
 # Extension image
 FROM alpine
 LABEL org.opencontainers.image.title="Grafana OpenTelemetry LGTM" \
@@ -19,7 +11,7 @@ LABEL org.opencontainers.image.title="Grafana OpenTelemetry LGTM" \
     com.docker.extension.additional-urls="[]" \
     com.docker.extension.categories="monitoring,observability"
 
-COPY --from=ui-builder /app/ui/dist /ui
+COPY ui/dist /ui
 COPY metadata.json .
 COPY grafana.svg .
 COPY docker-compose.yaml .

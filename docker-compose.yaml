@@ -3,10 +3,7 @@ services:
     image: grafana/otel-lgtm
     container_name: grafana-otel-lgtm
     ports:
-      - "3000:3000"
-      - "4317:4317"
-      - "4318:4318"
-    environment:
-      - GF_AUTH_ANONYMOUS_ENABLED=true
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
     restart: unless-stopped

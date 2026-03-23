@@ -11,10 +11,12 @@ import {
   CircularProgress,
   CssBaseline,
   Divider,
+  FormControlLabel,
   Grid,
   IconButton,
   Paper,
   Snackbar,
+  Switch,
   TextField,
   ThemeProvider,
   Tooltip,
@@ -25,6 +27,7 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
+import PauseIcon from "@mui/icons-material/Pause";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
@@ -32,7 +35,7 @@ import StopIcon from "@mui/icons-material/Stop";
 
 const ddClient = createDockerDesktopClient();
 
-const CONTAINER_NAME = "grafana-otel-lgtm";
+const CONTAINER_NAME = "grafana-otel-lgtm-ext";
 const CONFIG_KEY = "grafana-otel-lgtm-config";
 
 const darkTheme = createTheme({
@@ -59,12 +62,30 @@ const defaultConfig: Config = {
   enablePersistence: false,
 };
 
-type ContainerStatus = "running" | "exited" | "not_found" | "unknown";
+type ContainerStatus =
+  | "running"
+  | "paused"
+  | "exited"
+  | "not_found"
+  | "unknown";
+
+function isValidPort(port: number): boolean {
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
 
 function loadConfig(): Config {
   try {
     const saved = localStorage.getItem(CONFIG_KEY);
-    if (saved) return { ...defaultConfig, ...JSON.parse(saved) };
+    if (saved) {
+      const parsed = { ...defaultConfig, ...JSON.parse(saved) };
+      if (!isValidPort(parsed.grafanaPort))
+        parsed.grafanaPort = defaultConfig.grafanaPort;
+      if (!isValidPort(parsed.otlpGrpcPort))
+        parsed.otlpGrpcPort = defaultConfig.otlpGrpcPort;
+      if (!isValidPort(parsed.otlpHttpPort))
+        parsed.otlpHttpPort = defaultConfig.otlpHttpPort;
+      return parsed;
+    }
   } catch {
     // ignore parse errors
   }
@@ -77,9 +98,13 @@ function StatusBadge({ status }: { status: ContainerStatus | "loading" }) {
   }
   const map: Record<
     ContainerStatus,
-    { label: string; color: "success" | "error" | "default" | "warning" }
+    {
+      label: string;
+      color: "success" | "error" | "default" | "warning" | "info";
+    }
   > = {
     running: { label: "Running", color: "success" },
+    paused: { label: "Paused", color: "info" },
     exited: { label: "Stopped", color: "warning" },
     not_found: { label: "Not created", color: "default" },
     unknown: { label: "Unknown", color: "error" },
@@ -132,10 +157,17 @@ function EndpointRow({
   );
 }
 
+interface ActivePorts {
+  grafana: number;
+  otlpGrpc: number;
+  otlpHttp: number;
+}
+
 export function App() {
   const [status, setStatus] = useState<ContainerStatus | "loading">("loading");
   const [config, setConfig] = useState<Config>(loadConfig);
   const [draftConfig, setDraftConfig] = useState<Config>(loadConfig);
+  const [activePorts, setActivePorts] = useState<ActivePorts | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [toast, setToast] = useState<{
     msg: string;
@@ -146,16 +178,42 @@ export function App() {
     try {
       const result = await ddClient.docker.cli.exec("inspect", [
         "--format",
-        "{{.State.Status}}",
+        "{{.State.Status}}||{{json .NetworkSettings.Ports}}",
         CONTAINER_NAME,
       ]);
-      const s = result.stdout.trim();
+      const output = result.stdout.trim();
+      const sepIdx = output.indexOf("||");
+      const s = sepIdx >= 0 ? output.slice(0, sepIdx) : output;
+      const portsJson = sepIdx >= 0 ? output.slice(sepIdx + 2) : "";
+
       if (s === "running") setStatus("running");
-      else if (s === "exited" || s === "created" || s === "paused")
-        setStatus("exited");
+      else if (s === "paused") setStatus("paused");
+      else if (s === "exited" || s === "created") setStatus("exited");
       else setStatus("unknown");
+
+      // Parse actual port bindings
+      try {
+        if (portsJson) {
+          const ports = JSON.parse(portsJson);
+          const getHostPort = (containerPort: string): number => {
+            const bindings = ports[containerPort];
+            if (Array.isArray(bindings) && bindings.length > 0) {
+              return parseInt(bindings[0].HostPort, 10) || 0;
+            }
+            return 0;
+          };
+          setActivePorts({
+            grafana: getHostPort("3000/tcp"),
+            otlpGrpc: getHostPort("4317/tcp"),
+            otlpHttp: getHostPort("4318/tcp"),
+          });
+        }
+      } catch {
+        setActivePorts(null);
+      }
     } catch {
       setStatus("not_found");
+      setActivePorts(null);
     }
   }, []);
 
@@ -182,6 +240,8 @@ export function App() {
             "-d",
             "--name",
             CONTAINER_NAME,
+            "--label",
+            "com.docker.desktop.extension.managed-by=grafana-otel-lgtm-ext",
             "-p",
             `${config.grafanaPort}:3000`,
             "-p",
@@ -190,7 +250,14 @@ export function App() {
             `${config.otlpHttpPort}:4318`,
           ];
           if (config.enablePersistence) {
-            runArgs.push("-v", `${CONTAINER_NAME}-data:/var/lib/grafana`);
+            runArgs.push(
+              "-v",
+              `${CONTAINER_NAME}-grafana:/var/lib/grafana`,
+              "-v",
+              `${CONTAINER_NAME}-loki:/data/loki`,
+              "-v",
+              `${CONTAINER_NAME}-tempo:/var/tempo`,
+            );
           }
           runArgs.push("grafana/otel-lgtm");
           await ddClient.docker.cli.exec("run", runArgs);
@@ -221,6 +288,20 @@ export function App() {
       }
     });
 
+  const handleUnpause = () =>
+    withLoading(async () => {
+      try {
+        await ddClient.docker.cli.exec("unpause", [CONTAINER_NAME]);
+        setToast({ msg: "Container unpaused", severity: "success" });
+        await checkStatus();
+      } catch (e) {
+        setToast({
+          msg: `Failed to unpause: ${e instanceof Error ? e.message : String(e)}`,
+          severity: "error",
+        });
+      }
+    });
+
   const handleRestart = () =>
     withLoading(async () => {
       try {
@@ -238,7 +319,7 @@ export function App() {
   const handleRemove = () =>
     withLoading(async () => {
       try {
-        if (status === "running") {
+        if (status === "running" || status === "paused") {
           await ddClient.docker.cli.exec("stop", [CONTAINER_NAME]);
         }
         await ddClient.docker.cli.exec("rm", [CONTAINER_NAME]);
@@ -252,8 +333,24 @@ export function App() {
       }
     });
 
+  // Use actual ports from the running container when available, fall back to config
+  const displayPorts =
+    activePorts && status !== "not_found"
+      ? {
+          grafana: activePorts.grafana,
+          otlpGrpc: activePorts.otlpGrpc,
+          otlpHttp: activePorts.otlpHttp,
+        }
+      : {
+          grafana: config.grafanaPort,
+          otlpGrpc: config.otlpGrpcPort,
+          otlpHttp: config.otlpHttpPort,
+        };
+
   const handleOpenGrafana = async () => {
-    await ddClient.host.openExternal(`http://localhost:${config.grafanaPort}`);
+    await ddClient.host.openExternal(
+      `http://localhost:${displayPorts.grafana}`,
+    );
   };
 
   const handleCopy = (text: string) => {
@@ -262,21 +359,40 @@ export function App() {
   };
 
   const handleSaveConfig = () => {
+    const { grafanaPort, otlpGrpcPort, otlpHttpPort } = draftConfig;
+    if (
+      !isValidPort(grafanaPort) ||
+      !isValidPort(otlpGrpcPort) ||
+      !isValidPort(otlpHttpPort)
+    ) {
+      setToast({
+        msg: "Ports must be integers between 1 and 65535.",
+        severity: "error",
+      });
+      return;
+    }
+    const ports = [grafanaPort, otlpGrpcPort, otlpHttpPort];
+    if (new Set(ports).size !== ports.length) {
+      setToast({ msg: "Ports must not overlap.", severity: "error" });
+      return;
+    }
     localStorage.setItem(CONFIG_KEY, JSON.stringify(draftConfig));
     setConfig(draftConfig);
     setToast({
-      msg: "Configuration saved. Recreate the container to apply changes.",
+      msg: "Configuration saved. Remove and re-start the container to apply port changes.",
       severity: "info",
     });
   };
 
   const isRunning = status === "running";
+  const isPaused = status === "paused";
   const isStopped = status === "exited";
   const isNotFound = status === "not_found";
   const canStart = (isStopped || isNotFound) && !actionLoading;
-  const canStop = isRunning && !actionLoading;
-  const canRestart = isRunning && !actionLoading;
-  const canRemove = (isRunning || isStopped) && !actionLoading;
+  const canStop = (isRunning || isPaused) && !actionLoading;
+  const canUnpause = isPaused && !actionLoading;
+  const canRestart = (isRunning || isPaused) && !actionLoading;
+  const canRemove = (isRunning || isStopped || isPaused) && !actionLoading;
 
   return (
     <ThemeProvider theme={darkTheme}>
@@ -337,6 +453,17 @@ export function App() {
             >
               Start
             </Button>
+            {isPaused && (
+              <Button
+                variant="contained"
+                color="info"
+                startIcon={<PauseIcon />}
+                disabled={!canUnpause}
+                onClick={handleUnpause}
+              >
+                Unpause
+              </Button>
+            )}
             <Button
               variant="outlined"
               startIcon={<StopIcon />}
@@ -367,7 +494,7 @@ export function App() {
         </Paper>
 
         {/* Open Grafana */}
-        {isRunning && (
+        {(isRunning || isPaused) && (
           <Paper sx={{ p: 2, mb: 2 }}>
             <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
               <Box sx={{ flexGrow: 1 }}>
@@ -401,25 +528,28 @@ export function App() {
           </Typography>
           <EndpointRow
             label="OTLP gRPC"
-            value={`localhost:${config.otlpGrpcPort}`}
+            value={`localhost:${displayPorts.otlpGrpc}`}
             onCopy={handleCopy}
           />
           <Divider sx={{ my: 0.5 }} />
           <EndpointRow
             label="OTLP HTTP"
-            value={`http://localhost:${config.otlpHttpPort}`}
+            value={`http://localhost:${displayPorts.otlpHttp}`}
             onCopy={handleCopy}
           />
           <Divider sx={{ my: 0.5 }} />
           <EndpointRow
             label="Grafana UI"
-            value={`http://localhost:${config.grafanaPort}`}
+            value={`http://localhost:${displayPorts.grafana}`}
             onCopy={handleCopy}
           />
           <Divider sx={{ my: 1 }} />
           <Typography variant="caption" color="text.secondary">
             Set{" "}
-            <code>OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:{config.otlpHttpPort}</code>{" "}
+            <code>
+              OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:
+              {displayPorts.otlpHttp}
+            </code>{" "}
             in your application to send telemetry to this stack.
           </Typography>
         </Paper>
@@ -452,7 +582,13 @@ export function App() {
                       grafanaPort: Number(e.target.value),
                     }))
                   }
-                  helperText="Default: 3000"
+                  inputProps={{ min: 1, max: 65535, step: 1 }}
+                  error={!isValidPort(draftConfig.grafanaPort)}
+                  helperText={
+                    !isValidPort(draftConfig.grafanaPort)
+                      ? "1\u201365535"
+                      : "Default: 3000"
+                  }
                 />
               </Grid>
               <Grid item xs={12} sm={4}>
@@ -468,7 +604,13 @@ export function App() {
                       otlpGrpcPort: Number(e.target.value),
                     }))
                   }
-                  helperText="Default: 4317"
+                  inputProps={{ min: 1, max: 65535, step: 1 }}
+                  error={!isValidPort(draftConfig.otlpGrpcPort)}
+                  helperText={
+                    !isValidPort(draftConfig.otlpGrpcPort)
+                      ? "1\u201365535"
+                      : "Default: 4317"
+                  }
                 />
               </Grid>
               <Grid item xs={12} sm={4}>
@@ -484,7 +626,29 @@ export function App() {
                       otlpHttpPort: Number(e.target.value),
                     }))
                   }
-                  helperText="Default: 4318"
+                  inputProps={{ min: 1, max: 65535, step: 1 }}
+                  error={!isValidPort(draftConfig.otlpHttpPort)}
+                  helperText={
+                    !isValidPort(draftConfig.otlpHttpPort)
+                      ? "1\u201365535"
+                      : "Default: 4318"
+                  }
+                />
+              </Grid>
+              <Grid item xs={12}>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={draftConfig.enablePersistence}
+                      onChange={(e) =>
+                        setDraftConfig((c) => ({
+                          ...c,
+                          enablePersistence: e.target.checked,
+                        }))
+                      }
+                    />
+                  }
+                  label="Enable data persistence (Grafana, Loki, Tempo volumes)"
                 />
               </Grid>
               <Grid item xs={12}>
