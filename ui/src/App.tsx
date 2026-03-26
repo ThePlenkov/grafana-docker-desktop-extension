@@ -52,12 +52,14 @@ interface Config {
   grafanaPort: number;
   otlpGrpcPort: number;
   otlpHttpPort: number;
+  lokiPort: number;
 }
 
 const defaultConfig: Config = {
   grafanaPort: 3000,
   otlpGrpcPort: 4317,
   otlpHttpPort: 4318,
+  lokiPort: 3100,
 };
 
 type ContainerStatus =
@@ -93,6 +95,8 @@ function loadConfig(): Config {
         parsed.otlpGrpcPort = defaultConfig.otlpGrpcPort;
       if (!isValidPort(parsed.otlpHttpPort))
         parsed.otlpHttpPort = defaultConfig.otlpHttpPort;
+      if (!isValidPort(parsed.lokiPort))
+        parsed.lokiPort = defaultConfig.lokiPort;
       return parsed;
     }
   } catch {
@@ -170,6 +174,7 @@ interface ActivePorts {
   grafana: number;
   otlpGrpc: number;
   otlpHttp: number;
+  loki: number;
 }
 
 export function App() {
@@ -178,6 +183,9 @@ export function App() {
   const [draftConfig, setDraftConfig] = useState<Config>(loadConfig);
   const [activePorts, setActivePorts] = useState<ActivePorts | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
+  const [lokiDriverInstalled, setLokiDriverInstalled] = useState<
+    boolean | null
+  >(null);
   const [toast, setToast] = useState<{
     msg: string;
     severity: "success" | "error" | "info";
@@ -212,6 +220,7 @@ export function App() {
             grafana: getHostPort("3000/tcp"),
             otlpGrpc: getHostPort("4317/tcp"),
             otlpHttp: getHostPort("4318/tcp"),
+            loki: getHostPort("3100/tcp"),
           });
         }
       } catch {
@@ -223,8 +232,25 @@ export function App() {
     }
   }, []);
 
+  const checkLokiPlugin = useCallback(async () => {
+    try {
+      const result = await ddClient.docker.cli.exec("plugin", [
+        "ls",
+        "--format",
+        "{{.Name}}:{{.Enabled}}",
+      ]);
+      const lines = result.stdout.trim().split("\n").filter(Boolean);
+      setLokiDriverInstalled(
+        lines.some((l: string) => l.includes("loki") && l.endsWith(":true")),
+      );
+    } catch {
+      setLokiDriverInstalled(false);
+    }
+  }, []);
+
   useEffect(() => {
     checkStatus();
+    checkLokiPlugin();
     const id = setInterval(checkStatus, 5000);
     return () => clearInterval(id);
   }, [checkStatus]);
@@ -250,6 +276,8 @@ export function App() {
             "com.docker.desktop.extension.managed-by=grafana-otel-lgtm-ext",
             "--restart",
             "unless-stopped",
+            "--log-driver",
+            "json-file",
             "-v",
             `${VOLUME_NAME}:/data`,
             "-p",
@@ -258,6 +286,8 @@ export function App() {
             `${config.otlpGrpcPort}:4317`,
             "-p",
             `${config.otlpHttpPort}:4318`,
+            "-p",
+            `${config.lokiPort}:3100`,
           ];
           runArgs.push("grafana/otel-lgtm");
           await ddClient.docker.cli.exec("run", runArgs);
@@ -336,6 +366,29 @@ export function App() {
       }
     });
 
+  const handleInstallLokiPlugin = () =>
+    withLoading(async () => {
+      try {
+        await ddClient.docker.cli.exec("plugin", [
+          "install",
+          "grafana/loki-docker-driver:latest",
+          "--alias",
+          "loki",
+          "--grant-all-permissions",
+        ]);
+        setToast({
+          msg: "Loki Docker driver installed successfully",
+          severity: "success",
+        });
+        await checkLokiPlugin();
+      } catch (e) {
+        setToast({
+          msg: `Failed to install Loki driver: ${extractError(e)}`,
+          severity: "error",
+        });
+      }
+    });
+
   // Use actual ports from the running container when available, fall back to config
   const displayPorts =
     activePorts && status !== "not_found"
@@ -343,11 +396,13 @@ export function App() {
           grafana: activePorts.grafana,
           otlpGrpc: activePorts.otlpGrpc,
           otlpHttp: activePorts.otlpHttp,
+          loki: activePorts.loki,
         }
       : {
           grafana: config.grafanaPort,
           otlpGrpc: config.otlpGrpcPort,
           otlpHttp: config.otlpHttpPort,
+          loki: config.lokiPort,
         };
 
   const handleOpenGrafana = async () => {
@@ -362,11 +417,12 @@ export function App() {
   };
 
   const handleSaveConfig = () => {
-    const { grafanaPort, otlpGrpcPort, otlpHttpPort } = draftConfig;
+    const { grafanaPort, otlpGrpcPort, otlpHttpPort, lokiPort } = draftConfig;
     if (
       !isValidPort(grafanaPort) ||
       !isValidPort(otlpGrpcPort) ||
-      !isValidPort(otlpHttpPort)
+      !isValidPort(otlpHttpPort) ||
+      !isValidPort(lokiPort)
     ) {
       setToast({
         msg: "Ports must be integers between 1 and 65535.",
@@ -374,7 +430,7 @@ export function App() {
       });
       return;
     }
-    const ports = [grafanaPort, otlpGrpcPort, otlpHttpPort];
+    const ports = [grafanaPort, otlpGrpcPort, otlpHttpPort, lokiPort];
     if (new Set(ports).size !== ports.length) {
       setToast({ msg: "Ports must not overlap.", severity: "error" });
       return;
@@ -546,6 +602,12 @@ export function App() {
             value={`http://localhost:${displayPorts.grafana}`}
             onCopy={handleCopy}
           />
+          <Divider sx={{ my: 0.5 }} />
+          <EndpointRow
+            label="Loki Push API"
+            value={`http://localhost:${displayPorts.loki}/loki/api/v1/push`}
+            onCopy={handleCopy}
+          />
           <Divider sx={{ my: 1 }} />
           <Typography variant="caption" color="text.secondary">
             Set{" "}
@@ -572,7 +634,7 @@ export function App() {
           </AccordionSummary>
           <AccordionDetails>
             <Grid container spacing={2}>
-              <Grid item xs={12} sm={4}>
+              <Grid item xs={12} sm={3}>
                 <TextField
                   label="Grafana Port"
                   type="number"
@@ -594,7 +656,7 @@ export function App() {
                   }
                 />
               </Grid>
-              <Grid item xs={12} sm={4}>
+              <Grid item xs={12} sm={3}>
                 <TextField
                   label="OTLP gRPC Port"
                   type="number"
@@ -616,7 +678,7 @@ export function App() {
                   }
                 />
               </Grid>
-              <Grid item xs={12} sm={4}>
+              <Grid item xs={12} sm={3}>
                 <TextField
                   label="OTLP HTTP Port"
                   type="number"
@@ -635,6 +697,28 @@ export function App() {
                     !isValidPort(draftConfig.otlpHttpPort)
                       ? "1\u201365535"
                       : "Default: 4318"
+                  }
+                />
+              </Grid>
+              <Grid item xs={12} sm={3}>
+                <TextField
+                  label="Loki Port"
+                  type="number"
+                  size="small"
+                  fullWidth
+                  value={draftConfig.lokiPort}
+                  onChange={(e) =>
+                    setDraftConfig((c) => ({
+                      ...c,
+                      lokiPort: Number(e.target.value),
+                    }))
+                  }
+                  inputProps={{ min: 1, max: 65535, step: 1 }}
+                  error={!isValidPort(draftConfig.lokiPort)}
+                  helperText={
+                    !isValidPort(draftConfig.lokiPort)
+                      ? "1\u201365535"
+                      : "Default: 3100"
                   }
                 />
               </Grid>
@@ -657,6 +741,169 @@ export function App() {
                 </Box>
               </Grid>
             </Grid>
+          </AccordionDetails>
+        </Accordion>
+
+        {/* Log Collection Setup */}
+        <Accordion
+          sx={{
+            bgcolor: "background.paper",
+            "&:before": { display: "none" },
+            borderRadius: 1,
+            mt: 1,
+          }}
+        >
+          <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+              <Typography variant="subtitle1" fontWeight={600}>
+                Log Collection
+              </Typography>
+              {lokiDriverInstalled === true && (
+                <Chip label="Driver installed" color="success" size="small" />
+              )}
+              {lokiDriverInstalled === false && (
+                <Chip label="Driver not installed" color="warning" size="small" />
+              )}
+            </Box>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Collect logs from <strong>all</strong> Docker containers into
+              Grafana Loki using the Loki Docker logging driver. Once
+              configured, every container&apos;s stdout/stderr is automatically
+              shipped to Loki where you can query and filter (e.g. for errors)
+              in Grafana.
+            </Typography>
+
+            {/* Step 1 */}
+            <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 1 }}>
+              Step 1 &mdash; Install the Loki Docker driver plugin
+            </Typography>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2 }}>
+              <Button
+                variant="contained"
+                size="small"
+                disabled={actionLoading || lokiDriverInstalled === true}
+                onClick={handleInstallLokiPlugin}
+                startIcon={
+                  actionLoading ? (
+                    <CircularProgress size={14} color="inherit" />
+                  ) : undefined
+                }
+              >
+                {lokiDriverInstalled ? "Installed" : "Install Plugin"}
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={checkLokiPlugin}
+              >
+                Refresh Status
+              </Button>
+            </Box>
+
+            <Divider sx={{ my: 2 }} />
+
+            {/* Step 2 */}
+            <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 1 }}>
+              Step 2 &mdash; Configure Docker daemon
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              Open <strong>Docker Desktop &rarr; Settings &rarr; Docker
+              Engine</strong> and merge the following into your{" "}
+              <code>daemon.json</code>:
+            </Typography>
+            <Box
+              component="pre"
+              sx={{
+                bgcolor: "rgba(255,255,255,0.05)",
+                p: 2,
+                borderRadius: 1,
+                fontSize: "0.8rem",
+                fontFamily: "monospace",
+                overflow: "auto",
+                position: "relative",
+                mb: 1,
+              }}
+            >
+              <Tooltip title="Copy">
+                <IconButton
+                  size="small"
+                  sx={{ position: "absolute", top: 4, right: 4 }}
+                  onClick={() =>
+                    handleCopy(
+                      JSON.stringify(
+                        {
+                          "log-driver": "loki",
+                          "log-opts": {
+                            "loki-url": `http://localhost:${displayPorts.loki}/loki/api/v1/push`,
+                            "loki-batch-size": "400",
+                            "loki-retries": "5",
+                            "loki-max-backoff": "800ms",
+                            "loki-timeout": "1s",
+                            "keep-file": "true",
+                            "max-size": "10m",
+                            "max-file": "3",
+                          },
+                        },
+                        null,
+                        2,
+                      ),
+                    )
+                  }
+                >
+                  <ContentCopyIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+              {JSON.stringify(
+                {
+                  "log-driver": "loki",
+                  "log-opts": {
+                    "loki-url": `http://localhost:${displayPorts.loki}/loki/api/v1/push`,
+                    "loki-batch-size": "400",
+                    "loki-retries": "5",
+                    "loki-max-backoff": "800ms",
+                    "loki-timeout": "1s",
+                    "keep-file": "true",
+                    "max-size": "10m",
+                    "max-file": "3",
+                  },
+                },
+                null,
+                2,
+              )}
+            </Box>
+            <Alert severity="info" sx={{ mb: 2 }}>
+              <strong>keep-file: true</strong> ensures{" "}
+              <code>docker logs</code> still works alongside the Loki driver.
+              Merge these keys into your existing <code>daemon.json</code>
+              &mdash; don&apos;t replace the whole file.
+            </Alert>
+
+            <Divider sx={{ my: 2 }} />
+
+            {/* Step 3 */}
+            <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 1 }}>
+              Step 3 &mdash; Restart Docker Desktop
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              Apply &amp; restart Docker Desktop for the daemon config to take
+              effect. After restart, all <em>newly created</em> containers will
+              ship logs to Loki.
+            </Typography>
+
+            <Divider sx={{ my: 2 }} />
+
+            {/* Step 4 */}
+            <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 1 }}>
+              Step 4 &mdash; Query logs in Grafana
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Open Grafana &rarr; Explore &rarr; select the <strong>Loki</strong> data
+              source, and use LogQL to filter. For example, to see only error
+              lines:{" "}
+              <code>{`{compose_project=~".+"} |~ "(?i)error|panic|fatal"`}</code>
+            </Typography>
           </AccordionDetails>
         </Accordion>
       </Box>
