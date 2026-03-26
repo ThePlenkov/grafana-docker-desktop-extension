@@ -1,0 +1,12 @@
+# For local development / standalone use only.
+# NOT included in the Docker Desktop extension image — the UI manages
+# the container lifecycle via ddClient.docker.cli.exec().
+services:
+  otel-lgtm:
+    image: grafana/otel-lgtm
+    container_name: grafana-otel-lgtm
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+    restart: unless-stopped
